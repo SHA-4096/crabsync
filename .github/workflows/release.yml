@@ -51,7 +51,7 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ${{ matrix.artifact_name }}.tar.gz rusync
+          tar czf ${{ matrix.artifact_name }}.tar.gz crabsync
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

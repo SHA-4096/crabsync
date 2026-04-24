@@ -43,7 +43,7 @@ fn draw_help(f: &mut Frame, _app: &App, area: Rect) {
     use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
     let text = vec![
-        ratatui::text::Line::from("rusync - Key Bindings"),
+        ratatui::text::Line::from("crabsync - Key Bindings"),
         ratatui::text::Line::from(""),
         ratatui::text::Line::from("Pair List:"),
         ratatui::text::Line::from("  j/\u{2193}     - move down"),

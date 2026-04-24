@@ -182,6 +182,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabsync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "expectrl",
+ "ratatui",
+ "serde",
+ "tempfile",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
 name = "crossterm"
 version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -657,21 +672,6 @@ name = "rustversion"
 version = "1.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
-
-[[package]]
-name = "rusync"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "expectrl",
- "ratatui",
- "serde",
- "tempfile",
- "toml",
- "walkdir",
-]
 
 [[package]]
 name = "ryu"

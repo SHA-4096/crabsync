@@ -37,12 +37,29 @@ Single-binary Rust TUI app for rsync file synchronization.
 ## CLI Usage
 
 ```bash
-rusync add <name> <local> <remote>   # positional args, not flags
-rusync remove <name>
-rusync list
-rusync sync <name>                   # launches TUI directly into file tree
-rusync                               # launches TUI at pair list
+crabsync add <name> <local> <remote>   # positional args, not flags
+crabsync remove <name>
+crabsync list
+crabsync sync <name>                   # launches TUI directly into file tree
+crabsync                               # launches TUI at pair list
 ```
+
+## Release
+
+Push a `v*` tag to trigger the GitHub Actions release workflow (`.github/workflows/release.yml`):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Builds 4 targets in parallel and uploads to GitHub Release:
+- `crabsync-x86_64-unknown-linux-gnu.tar.gz`
+- `crabsync-aarch64-unknown-linux-gnu.tar.gz`
+- `crabsync-x86_64-apple-darwin.tar.gz`
+- `crabsync-aarch64-apple-darwin.tar.gz`
+
+**Naming**: GitHub repo, Cargo package, binary, and release artifacts are all named **crabsync**.
 
 ## Runtime Dependencies
 

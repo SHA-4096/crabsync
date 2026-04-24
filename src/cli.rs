@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::config;
 
 #[derive(Parser)]
-#[command(name = "rusync", about = "A TUI for rsync file synchronization")]
+#[command(name = "crabsync", about = "A TUI for rsync file synchronization")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
