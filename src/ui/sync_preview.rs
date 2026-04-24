@@ -4,13 +4,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, SyncDirection};
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
-    let title = if let Some(pair) = &app.current_pair {
-        format!(" Sync Preview (dry-run) - {} ", pair.name)
+    let direction_label = if app.sync_direction == SyncDirection::Download {
+        "Download"
     } else {
-        " Sync Preview ".to_string()
+        "Upload"
+    };
+    let title = if let Some(pair) = &app.current_pair {
+        format!(" {} Preview (dry-run) - {} ", direction_label, pair.name)
+    } else {
+        format!(" {} Preview ", direction_label)
     };
 
     let mut lines: Vec<Line> = Vec::new();

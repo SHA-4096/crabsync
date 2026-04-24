@@ -155,15 +155,32 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let selected_count = app
+    let source_selected = app
         .tree
         .as_ref()
         .map(|t| t.collect_selected().len())
         .unwrap_or(0);
+    let target_selected = app
+        .remote_tree
+        .as_ref()
+        .map(|t| t.collect_selected().len())
+        .unwrap_or(0);
+
+    let sync_hint = match app.active_panel {
+        ActivePanel::Source => format!("s: sync({} selected)", source_selected),
+        ActivePanel::Target => {
+            if matches!(app.remote_status, RemoteStatus::Loaded) {
+                format!("d: download({} selected)", target_selected)
+            } else {
+                String::new()
+            }
+        }
+    };
+
     let status = if app.status_msg.is_empty() {
         format!(
-            "Space: toggle | Enter: expand | s: sync({} selected) | a: select all | Tab: switch panel | r: reload remote | ?: help | Esc: back",
-            selected_count
+            "Space: toggle | Enter: expand | {} | a: select all | Tab: switch panel | r: reload remote | p: password | ?: help | Esc: back",
+            sync_hint
         )
     } else {
         app.status_msg.clone()
@@ -227,6 +244,8 @@ fn build_target_items<'a>(app: &App) -> Vec<ListItem<'a>> {
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::REVERSED)
+            } else if node.selected {
+                Style::default().fg(Color::Green)
             } else if node.is_dir {
                 Style::default().fg(Color::Yellow)
             } else {
@@ -235,15 +254,21 @@ fn build_target_items<'a>(app: &App) -> Vec<ListItem<'a>> {
 
             let line = if node.is_dir {
                 let icon = if node.expanded { "▼" } else { "▶" };
+                let check = if node.selected { "☑" } else { "☐" };
                 Line::from(vec![
                     Span::styled(indent.clone(), style),
                     Span::styled(icon.to_string(), style),
                     Span::styled(" ".to_string(), style),
+                    Span::styled(check.to_string(), style),
+                    Span::styled(" ".to_string(), style),
                     Span::styled(node.display_name(), style),
                 ])
             } else {
+                let check = if node.selected { "☑" } else { "☐" };
                 Line::from(vec![
                     Span::styled(indent.clone(), style),
+                    Span::styled(check.to_string(), style),
+                    Span::styled(" ".to_string(), style),
                     Span::styled(node.display_name(), style),
                 ])
             };
@@ -284,11 +309,14 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             ActivePanel::Source => app.tree_cursor_up(),
             ActivePanel::Target => app.remote_tree_cursor_up(),
         },
-        KeyCode::Char(' ') => {
-            if app.active_panel == ActivePanel::Source {
-                app.toggle_tree_item();
+        KeyCode::Char(' ') => match app.active_panel {
+            ActivePanel::Source => app.toggle_tree_item(),
+            ActivePanel::Target => {
+                if matches!(app.remote_status, RemoteStatus::Loaded) {
+                    app.toggle_remote_tree_item();
+                }
             }
-        }
+        },
         KeyCode::Enter => {
             if app.active_panel == ActivePanel::Source {
                 app.toggle_expand();
@@ -296,14 +324,24 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 app.toggle_expand_remote();
             }
         }
-        KeyCode::Char('a') => {
-            if app.active_panel == ActivePanel::Source {
-                app.toggle_select_all();
+        KeyCode::Char('a') => match app.active_panel {
+            ActivePanel::Source => app.toggle_select_all(),
+            ActivePanel::Target => {
+                if matches!(app.remote_status, RemoteStatus::Loaded) {
+                    app.toggle_select_all_remote();
+                }
             }
-        }
+        },
         KeyCode::Char('s') => {
             if app.active_panel == ActivePanel::Source {
                 app.do_dry_run();
+            }
+        }
+        KeyCode::Char('d') => {
+            if app.active_panel == ActivePanel::Target
+                && matches!(app.remote_status, RemoteStatus::Loaded)
+            {
+                app.do_dry_run_reverse();
             }
         }
         KeyCode::Char('r') => app.load_remote_tree(),

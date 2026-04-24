@@ -36,6 +36,12 @@ pub enum PasswordContext {
     RemoteList,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SyncDirection {
+    Upload,
+    Download,
+}
+
 pub struct App {
     pub mode: Mode,
     pub previous_mode: Option<Mode>,
@@ -61,6 +67,7 @@ pub struct App {
     pub remote_tree_cursor: usize,
     pub remote_status: RemoteStatus,
     pub password_context: PasswordContext,
+    pub sync_direction: SyncDirection,
 }
 
 impl App {
@@ -99,6 +106,7 @@ impl App {
                     remote_tree_cursor: 0,
                     remote_status: RemoteStatus::NotLoaded,
                     password_context: PasswordContext::Sync,
+                    sync_direction: SyncDirection::Upload,
                 };
                 app.load_remote_tree();
                 return Ok(app);
@@ -132,6 +140,7 @@ impl App {
             remote_tree_cursor: 0,
             remote_status: RemoteStatus::NotLoaded,
             password_context: PasswordContext::Sync,
+            sync_direction: SyncDirection::Upload,
         })
     }
 
@@ -308,7 +317,48 @@ impl App {
         }
     }
 
+    pub fn toggle_remote_tree_item(&mut self) {
+        if self.remote_tree_items.is_empty() || !matches!(self.remote_status, RemoteStatus::Loaded)
+        {
+            return;
+        }
+        let cursor = self.remote_tree_cursor;
+        if let Some(item) = self.remote_tree_items.get(cursor) {
+            let rel_path = item.1.relative_path.clone();
+            let is_dir = item.1.is_dir;
+            if let Some(tree) = &mut self.remote_tree {
+                toggle_node_by_path(tree, &rel_path, is_dir, false);
+                self.remote_tree_items.clear();
+                tree::flatten_tree_for_display(tree, 0, &mut self.remote_tree_items);
+            }
+        }
+    }
+
+    pub fn toggle_select_all_remote(&mut self) {
+        if !matches!(self.remote_status, RemoteStatus::Loaded) {
+            return;
+        }
+        self.select_all = !self.select_all;
+        if let Some(tree) = &mut self.remote_tree {
+            tree.select_all(self.select_all);
+            self.remote_tree_items.clear();
+            tree::flatten_tree_for_display(tree, 0, &mut self.remote_tree_items);
+        }
+    }
+
+    pub fn reload_local_tree(&mut self) {
+        if let Some(pair) = &self.current_pair {
+            if let Ok(tree) = tree::build_tree(Path::new(&pair.local)) {
+                let mut items = Vec::new();
+                tree::flatten_tree_for_display(&tree, 0, &mut items);
+                self.tree = Some(tree);
+                self.tree_items = items;
+            }
+        }
+    }
+
     pub fn do_dry_run(&mut self) {
+        self.sync_direction = SyncDirection::Upload;
         if let (Some(tree), Some(pair)) = (&self.tree, &self.current_pair) {
             let files = tree.collect_selected();
             if files.is_empty() {
@@ -340,58 +390,129 @@ impl App {
         }
     }
 
+    pub fn do_dry_run_reverse(&mut self) {
+        if !matches!(self.remote_status, RemoteStatus::Loaded) {
+            return;
+        }
+        self.sync_direction = SyncDirection::Download;
+        if let (Some(remote_tree), Some(pair)) = (&self.remote_tree, &self.current_pair) {
+            let files = remote_tree.collect_selected();
+            if files.is_empty() {
+                self.status_msg = "no files selected".to_string();
+                return;
+            }
+            match sync::dry_run(&pair.remote, &pair.local, &files) {
+                Ok(output) => {
+                    self.dry_run_output = output;
+                    self.sync_command =
+                        sync::build_command_display(&pair.remote, &pair.local, &files);
+                    self.mode = Mode::SyncPreview;
+                    self.status_msg.clear();
+                }
+                Err(SyncError::AuthRequired) => {
+                    self.dry_run_output =
+                        "Authentication required: SSH key not configured for this remote.\n\n\
+                         You can still proceed — a password prompt will appear when you confirm sync."
+                            .to_string();
+                    self.sync_command =
+                        sync::build_command_display(&pair.remote, &pair.local, &files);
+                    self.mode = Mode::SyncPreview;
+                    self.status_msg.clear();
+                }
+                Err(SyncError::Other(msg)) => {
+                    self.status_msg = format!("dry-run error: {}", msg);
+                }
+            }
+        }
+    }
+
     pub fn do_sync(&mut self) {
-        if let (Some(tree), Some(pair)) = (&self.tree, &self.current_pair) {
+        let is_download = self.sync_direction == SyncDirection::Download;
+
+        let (src, dst, files) = if is_download {
+            let remote_tree = match &self.remote_tree {
+                Some(t) => t,
+                None => return,
+            };
+            let pair = match &self.current_pair {
+                Some(p) => p,
+                None => return,
+            };
+            let files = remote_tree.collect_selected();
+            if files.is_empty() {
+                self.status_msg = "no files selected".to_string();
+                return;
+            }
+            (pair.remote.clone(), pair.local.clone(), files)
+        } else {
+            let tree = match &self.tree {
+                Some(t) => t,
+                None => return,
+            };
+            let pair = match &self.current_pair {
+                Some(p) => p,
+                None => return,
+            };
             let files = tree.collect_selected();
             if files.is_empty() {
                 self.status_msg = "no files selected".to_string();
                 return;
             }
-            match sync::do_sync(&pair.local, &pair.remote, &files) {
-                Ok(result) => {
-                    self.sync_output = result.output;
-                    self.sync_error = !result.success;
-                    self.mode = Mode::SyncProgress;
-                    self.status_msg.clear();
-                    if result.success {
+            (pair.local.clone(), pair.remote.clone(), files)
+        };
+
+        match sync::do_sync(&src, &dst, &files) {
+            Ok(result) => {
+                self.sync_output = result.output;
+                self.sync_error = !result.success;
+                self.mode = Mode::SyncProgress;
+                self.status_msg.clear();
+                if result.success {
+                    if is_download {
+                        self.reload_local_tree();
+                    } else {
                         self.load_remote_tree();
                     }
                 }
-                Err(SyncError::AuthRequired) => {
-                    let files_clone = files.clone();
-                    let local = pair.local.clone();
-                    let remote = pair.remote.clone();
-                    match sync::do_sync_interactive(&local, &remote, &files_clone) {
-                        Ok(SyncPhase::NeedPassword((session, pre_output))) => {
-                            self.pty_session = Some((session, pre_output));
-                            self.password_buffer.clear();
-                            self.password_context = PasswordContext::Sync;
-                            self.mode = Mode::PasswordInput;
-                        }
-                        Ok(SyncPhase::Done(result)) => {
-                            self.sync_output = result.output;
-                            self.sync_error = !result.success;
-                            self.mode = Mode::SyncProgress;
-                            self.status_msg.clear();
-                            if result.success {
+            }
+            Err(SyncError::AuthRequired) => {
+                let files_clone = files.clone();
+                let src_c = src.clone();
+                let dst_c = dst.clone();
+                match sync::do_sync_interactive(&src_c, &dst_c, &files_clone) {
+                    Ok(SyncPhase::NeedPassword((session, pre_output))) => {
+                        self.pty_session = Some((session, pre_output));
+                        self.password_buffer.clear();
+                        self.password_context = PasswordContext::Sync;
+                        self.mode = Mode::PasswordInput;
+                    }
+                    Ok(SyncPhase::Done(result)) => {
+                        self.sync_output = result.output;
+                        self.sync_error = !result.success;
+                        self.mode = Mode::SyncProgress;
+                        self.status_msg.clear();
+                        if result.success {
+                            if is_download {
+                                self.reload_local_tree();
+                            } else {
                                 self.load_remote_tree();
                             }
                         }
-                        Err(SyncError::AuthRequired) => {
-                            self.show_auth_fallback();
-                        }
-                        Err(SyncError::Other(msg)) => {
-                            self.sync_output = msg;
-                            self.sync_error = true;
-                            self.mode = Mode::SyncProgress;
-                        }
+                    }
+                    Err(SyncError::AuthRequired) => {
+                        self.show_auth_fallback();
+                    }
+                    Err(SyncError::Other(msg)) => {
+                        self.sync_output = msg;
+                        self.sync_error = true;
+                        self.mode = Mode::SyncProgress;
                     }
                 }
-                Err(SyncError::Other(msg)) => {
-                    self.sync_output = msg;
-                    self.sync_error = true;
-                    self.mode = Mode::SyncProgress;
-                }
+            }
+            Err(SyncError::Other(msg)) => {
+                self.sync_output = msg;
+                self.sync_error = true;
+                self.mode = Mode::SyncProgress;
             }
         }
     }
@@ -413,7 +534,11 @@ impl App {
                         self.sync_output = result.output;
                         self.sync_error = !result.success;
                         self.mode = Mode::SyncProgress;
-                        self.load_remote_tree();
+                        if self.sync_direction == SyncDirection::Download {
+                            self.reload_local_tree();
+                        } else {
+                            self.load_remote_tree();
+                        }
                     }
                     PasswordContext::RemoteList => {
                         if result.success {

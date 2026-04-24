@@ -576,4 +576,39 @@ mod tests {
             "list_remote should fail for nonexistent dir"
         );
     }
+
+    #[test]
+    fn test_do_sync_reverse_direction() {
+        let local = tempfile::TempDir::new().unwrap();
+        let remote = tempfile::TempDir::new().unwrap();
+
+        fs::write(remote.path().join("file1.txt"), "from_remote").unwrap();
+        fs::create_dir(remote.path().join("subdir")).unwrap();
+        fs::write(remote.path().join("subdir/file2.txt"), "world").unwrap();
+
+        let files = vec![
+            PathBuf::from("file1.txt"),
+            PathBuf::from("subdir/file2.txt"),
+        ];
+
+        let result = do_sync(
+            remote.path().to_str().unwrap(),
+            local.path().to_str().unwrap(),
+            &files,
+        )
+        .unwrap();
+
+        assert!(result.success, "reverse sync should succeed");
+        assert!(
+            local.path().join("file1.txt").exists(),
+            "file1.txt should exist in local after download"
+        );
+        assert!(
+            local.path().join("subdir/file2.txt").exists(),
+            "subdir/file2.txt should exist in local after download"
+        );
+
+        let content = fs::read_to_string(local.path().join("file1.txt")).unwrap();
+        assert_eq!(content, "from_remote");
+    }
 }
