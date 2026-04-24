@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use expectrl::Expect;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -9,19 +10,57 @@ pub struct SyncResult {
     pub success: bool,
 }
 
-fn build_args(local: &str, remote: &str, files_from_path: &str, dry_run: bool) -> Vec<String> {
+#[derive(Debug)]
+pub enum SyncError {
+    AuthRequired,
+    Other(String),
+}
+
+impl std::fmt::Display for SyncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncError::AuthRequired => write!(f, "authentication required: SSH key not configured"),
+            SyncError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+pub enum SyncPhase {
+    NeedPassword((expectrl::session::OsSession, Vec<u8>)),
+    Done(SyncResult),
+}
+
+fn build_args(
+    local: &str,
+    remote: &str,
+    files_from_path: &str,
+    dry_run: bool,
+    batch_mode: bool,
+) -> Vec<String> {
     let flags = if dry_run { "-avzn" } else { "-avz" };
-    vec![
+    let mut args = vec![
         flags.to_string(),
         "--relative".to_string(),
         format!("--files-from={}", files_from_path),
-        format!("{}/", local),
-        format!("{}/", remote),
-    ]
+    ];
+    if batch_mode {
+        args.push(r#"--rsh=ssh -o BatchMode=yes"#.to_string());
+    }
+    args.push(format!("{}/", local));
+    args.push(format!("{}/", remote));
+    args
+}
+
+fn is_auth_error(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("permission denied")
+        || lower.contains("authentication")
+        || lower.contains("auth fail")
+        || lower.contains("host key verification failed")
 }
 
 pub fn build_command_display(local: &str, remote: &str, files: &[PathBuf]) -> String {
-    let args = build_args(local, remote, "<file-list>", false);
+    let args = build_args(local, remote, "<file-list>", false, true);
     let mut cmd = format!("rsync {}", args.join(" "));
     if !files.is_empty() {
         cmd.push_str("\n\nFile list:");
@@ -32,12 +71,17 @@ pub fn build_command_display(local: &str, remote: &str, files: &[PathBuf]) -> St
     cmd
 }
 
-pub fn dry_run(local: &str, remote: &str, files: &[PathBuf]) -> Result<String> {
-    let files_from = write_files_from(files)?;
+pub fn dry_run(
+    local: &str,
+    remote: &str,
+    files: &[PathBuf],
+) -> std::result::Result<String, SyncError> {
+    let files_from = write_files_from(files).map_err(|e| SyncError::Other(e.to_string()))?;
     let args = build_args(
         local,
         remote,
         &files_from.path().display().to_string(),
+        true,
         true,
     );
     let output = Command::new("rsync")
@@ -45,36 +89,51 @@ pub fn dry_run(local: &str, remote: &str, files: &[PathBuf]) -> Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .context("failed to run rsync dry-run")?;
+        .map_err(|e| SyncError::Other(format!("failed to run rsync dry-run: {}", e)))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
-        anyhow::bail!("rsync dry-run failed:\n{}", stderr);
+        if is_auth_error(&stderr) {
+            return Err(SyncError::AuthRequired);
+        }
+        return Err(SyncError::Other(format!(
+            "rsync dry-run failed:\n{}",
+            stderr
+        )));
     }
 
     Ok(if stdout.is_empty() { stderr } else { stdout })
 }
 
-pub fn do_sync(local: &str, remote: &str, files: &[PathBuf]) -> Result<SyncResult> {
-    let files_from = write_files_from(files)?;
+pub fn do_sync(
+    local: &str,
+    remote: &str,
+    files: &[PathBuf],
+) -> std::result::Result<SyncResult, SyncError> {
+    let files_from = write_files_from(files).map_err(|e| SyncError::Other(e.to_string()))?;
     let args = build_args(
         local,
         remote,
         &files_from.path().display().to_string(),
         false,
+        true,
     );
     let output = Command::new("rsync")
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .context("failed to run rsync")?;
+        .map_err(|e| SyncError::Other(format!("failed to run rsync: {}", e)))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let success = output.status.success();
+
+    if !success && is_auth_error(&stderr) {
+        return Err(SyncError::AuthRequired);
+    }
 
     let combined = if stdout.is_empty() {
         stderr
@@ -88,6 +147,126 @@ pub fn do_sync(local: &str, remote: &str, files: &[PathBuf]) -> Result<SyncResul
         output: combined,
         success,
     })
+}
+
+pub fn do_sync_interactive(
+    local: &str,
+    remote: &str,
+    files: &[PathBuf],
+) -> std::result::Result<SyncPhase, SyncError> {
+    let files_from = write_files_from(files).map_err(|e| SyncError::Other(e.to_string()))?;
+    let args = build_args(
+        local,
+        remote,
+        &files_from.path().display().to_string(),
+        false,
+        false,
+    );
+
+    let cmd_str = format!("rsync {}", args.join(" "));
+    let mut session = expectrl::spawn(&cmd_str).map_err(|e| {
+        SyncError::Other(format!(
+            "PTY not available: {}. Please configure SSH key-based authentication.",
+            e
+        ))
+    })?;
+
+    session.set_expect_timeout(Some(std::time::Duration::from_secs(30)));
+
+    let mut pre_output = Vec::new();
+
+    loop {
+        match session.expect(expectrl::Any::boxed(vec![
+            Box::new(expectrl::Regex("(?i)password")),
+            Box::new(expectrl::Regex("(?i)are you sure")),
+            Box::new(expectrl::Regex("(?i)fingerprint")),
+        ])) {
+            Ok(captures) => {
+                let matched = String::from_utf8_lossy(captures.as_bytes());
+                pre_output.extend_from_slice(captures.as_bytes());
+
+                if matched.to_lowercase().contains("password") {
+                    return Ok(SyncPhase::NeedPassword((session, pre_output)));
+                } else {
+                    session.send_line("yes").map_err(|e| {
+                        SyncError::Other(format!("failed to send host key confirmation: {}", e))
+                    })?;
+                    continue;
+                }
+            }
+            Err(expectrl::Error::Eof) => {
+                let output = drain_session_with_prefix(session, &pre_output);
+                return Ok(SyncPhase::Done(SyncResult {
+                    output,
+                    success: true,
+                }));
+            }
+            Err(expectrl::Error::ExpectTimeout) => {
+                let output = drain_session_with_prefix(session, &pre_output);
+                return Ok(SyncPhase::Done(SyncResult {
+                    output,
+                    success: true,
+                }));
+            }
+            Err(e) => return Err(SyncError::Other(format!("unexpected rsync output: {}", e))),
+        }
+    }
+}
+
+pub fn feed_password(
+    mut session: expectrl::session::OsSession,
+    pre_output: Vec<u8>,
+    password: &str,
+) -> std::result::Result<SyncResult, SyncError> {
+    session
+        .send_line(password)
+        .map_err(|e| SyncError::Other(format!("failed to send password: {}", e)))?;
+
+    let mut output = pre_output;
+
+    loop {
+        match session.expect(expectrl::Eof) {
+            Ok(captures) => {
+                output.extend_from_slice(captures.as_bytes());
+                break;
+            }
+            Err(expectrl::Error::ExpectTimeout) => {
+                let mut tmp = [0u8; 4096];
+                let _ = session.try_read(&mut tmp);
+                continue;
+            }
+            Err(e) => {
+                return Err(SyncError::Other(format!(
+                    "error waiting for rsync to finish: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    let output_str = String::from_utf8_lossy(&output).to_string();
+    let success = !output_str.to_lowercase().contains("permission denied")
+        && !output_str.to_lowercase().contains("authentication");
+
+    Ok(SyncResult {
+        output: output_str,
+        success,
+    })
+}
+
+fn drain_session_with_prefix(mut session: expectrl::session::OsSession, prefix: &[u8]) -> String {
+    let mut all = prefix.to_vec();
+    loop {
+        match session.expect(expectrl::Eof) {
+            Ok(captures) => {
+                all.extend_from_slice(captures.as_bytes());
+                break;
+            }
+            Err(expectrl::Error::ExpectTimeout) => continue,
+            _ => break,
+        }
+    }
+    String::from_utf8_lossy(&all).to_string()
 }
 
 fn write_files_from(files: &[PathBuf]) -> Result<NamedTempFile> {
@@ -272,5 +451,26 @@ mod tests {
         let content = fs::read_to_string(tmp.path()).unwrap();
 
         assert_eq!(content, "a.txt\nb/c.txt\n");
+    }
+
+    #[test]
+    fn test_is_auth_error() {
+        assert!(is_auth_error("Permission denied (publickey,password)."));
+        assert!(is_auth_error("Authentication failed."));
+        assert!(is_auth_error("Host key verification failed."));
+        assert!(!is_auth_error("No such file or directory"));
+        assert!(!is_auth_error("rsync: write error"));
+    }
+
+    #[test]
+    fn test_build_args_includes_batch_mode() {
+        let args = build_args("/local", "/remote", "/tmp/files", false, true);
+        assert!(args.contains(&r#"--rsh=ssh -o BatchMode=yes"#.to_string()));
+    }
+
+    #[test]
+    fn test_build_args_without_batch_mode() {
+        let args = build_args("/local", "/remote", "/tmp/files", false, false);
+        assert!(!args.iter().any(|a| a.contains("BatchMode")));
     }
 }

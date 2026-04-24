@@ -2,3 +2,8 @@
 name = "my-project"
 local = "/tmp/rusync_test_local"
 remote = "/tmp/rusync_test_remote"
+
+[[pairs]]
+name = "remote-test"
+local = "/tmp/rusync_test_local"
+remote = "local-docker-debug:/tmp"

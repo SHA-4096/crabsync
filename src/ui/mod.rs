@@ -1,5 +1,6 @@
 mod file_tree;
 mod pair_list;
+mod password_input;
 mod sync_preview;
 mod sync_progress;
 
@@ -15,6 +16,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::FileTree => file_tree::draw(f, app, area),
         Mode::SyncPreview => sync_preview::draw(f, app, area),
         Mode::SyncProgress => sync_progress::draw(f, app, area),
+        Mode::PasswordInput => password_input::draw(f, app, area),
         Mode::Help => draw_help(f, app, area),
     }
 }
@@ -25,6 +27,7 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
         Mode::FileTree => file_tree::handle_key(app, key),
         Mode::SyncPreview => sync_preview::handle_key(app, key),
         Mode::SyncProgress => sync_progress::handle_key(app, key),
+        Mode::PasswordInput => password_input::handle_key(app, key),
         Mode::Help => {
             if let crossterm::event::KeyCode::Char('q') | crossterm::event::KeyCode::Esc = key.code
             {
@@ -43,14 +46,14 @@ fn draw_help(f: &mut Frame, _app: &App, area: Rect) {
         ratatui::text::Line::from("rusync - Key Bindings"),
         ratatui::text::Line::from(""),
         ratatui::text::Line::from("Pair List:"),
-        ratatui::text::Line::from("  j/↓     - move down"),
-        ratatui::text::Line::from("  k/↑     - move up"),
+        ratatui::text::Line::from("  j/\u{2193}     - move down"),
+        ratatui::text::Line::from("  k/\u{2191}     - move up"),
         ratatui::text::Line::from("  Enter   - enter file tree"),
         ratatui::text::Line::from("  d       - delete pair"),
         ratatui::text::Line::from(""),
         ratatui::text::Line::from("File Tree:"),
-        ratatui::text::Line::from("  j/↓     - move down"),
-        ratatui::text::Line::from("  k/↑     - move up"),
+        ratatui::text::Line::from("  j/\u{2193}     - move down"),
+        ratatui::text::Line::from("  k/\u{2191}     - move up"),
         ratatui::text::Line::from("  Space   - toggle selection"),
         ratatui::text::Line::from("  Enter   - expand/collapse dir"),
         ratatui::text::Line::from("  a       - select/deselect all"),
@@ -59,6 +62,10 @@ fn draw_help(f: &mut Frame, _app: &App, area: Rect) {
         ratatui::text::Line::from("Sync Preview:"),
         ratatui::text::Line::from("  y       - confirm sync"),
         ratatui::text::Line::from("  n/Esc   - go back"),
+        ratatui::text::Line::from(""),
+        ratatui::text::Line::from("Password Input:"),
+        ratatui::text::Line::from("  Enter   - submit password"),
+        ratatui::text::Line::from("  Esc     - cancel"),
         ratatui::text::Line::from(""),
         ratatui::text::Line::from("Sync Progress:"),
         ratatui::text::Line::from("  Enter/Esc - return to pair list"),

@@ -37,6 +37,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
+    let auth_required = app.dry_run_output.contains("Authentication required");
+
     if app.dry_run_output.is_empty() {
         lines.push(Line::from("No changes to sync."));
     } else {
@@ -60,7 +62,11 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(paragraph, area);
 
-    let status = "y: confirm sync | n/Esc: go back | ?: help";
+    let status = if auth_required {
+        "y: confirm sync (password required) | n/Esc: go back | ?: help"
+    } else {
+        "y: confirm sync | n/Esc: go back | ?: help"
+    };
     let status_bar = Paragraph::new(status).style(Style::default().fg(Color::DarkGray));
     let status_area = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
     f.render_widget(status_bar, status_area);

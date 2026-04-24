@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::config::Pair;
-use crate::sync;
+use crate::sync::{self, SyncError, SyncPhase};
 use crate::tree::{self, FileNode};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -11,6 +11,7 @@ pub enum Mode {
     FileTree,
     SyncPreview,
     SyncProgress,
+    PasswordInput,
     Help,
 }
 
@@ -31,6 +32,8 @@ pub struct App {
     pub status_msg: String,
     pub should_quit: bool,
     pub select_all: bool,
+    pub pty_session: Option<(expectrl::session::OsSession, Vec<u8>)>,
+    pub password_buffer: String,
 }
 
 impl App {
@@ -61,6 +64,8 @@ impl App {
                     status_msg: String::new(),
                     should_quit: false,
                     select_all: false,
+                    pty_session: None,
+                    password_buffer: String::new(),
                 });
             } else {
                 anyhow::bail!("pair '{}' not found", name);
@@ -84,6 +89,8 @@ impl App {
             status_msg: String::new(),
             should_quit: false,
             select_all: false,
+            pty_session: None,
+            password_buffer: String::new(),
         })
     }
 
@@ -161,8 +168,18 @@ impl App {
                     self.mode = Mode::SyncPreview;
                     self.status_msg.clear();
                 }
-                Err(e) => {
-                    self.status_msg = format!("dry-run error: {}", e);
+                Err(SyncError::AuthRequired) => {
+                    self.dry_run_output =
+                        "Authentication required: SSH key not configured for this remote.\n\n\
+                         You can still proceed — a password prompt will appear when you confirm sync."
+                            .to_string();
+                    self.sync_command =
+                        sync::build_command_display(&pair.local, &pair.remote, &files);
+                    self.mode = Mode::SyncPreview;
+                    self.status_msg.clear();
+                }
+                Err(SyncError::Other(msg)) => {
+                    self.status_msg = format!("dry-run error: {}", msg);
                 }
             }
         }
@@ -182,11 +199,80 @@ impl App {
                     self.mode = Mode::SyncProgress;
                     self.status_msg.clear();
                 }
-                Err(e) => {
-                    self.status_msg = format!("sync error: {}", e);
+                Err(SyncError::AuthRequired) => {
+                    let files_clone = files.clone();
+                    let local = pair.local.clone();
+                    let remote = pair.remote.clone();
+                    match sync::do_sync_interactive(&local, &remote, &files_clone) {
+                        Ok(SyncPhase::NeedPassword((session, pre_output))) => {
+                            self.pty_session = Some((session, pre_output));
+                            self.password_buffer.clear();
+                            self.mode = Mode::PasswordInput;
+                        }
+                        Ok(SyncPhase::Done(result)) => {
+                            self.sync_output = result.output;
+                            self.sync_error = !result.success;
+                            self.mode = Mode::SyncProgress;
+                            self.status_msg.clear();
+                        }
+                        Err(SyncError::AuthRequired) => {
+                            self.show_auth_fallback();
+                        }
+                        Err(SyncError::Other(msg)) => {
+                            self.sync_output = msg;
+                            self.sync_error = true;
+                            self.mode = Mode::SyncProgress;
+                        }
+                    }
+                }
+                Err(SyncError::Other(msg)) => {
+                    self.sync_output = msg;
+                    self.sync_error = true;
+                    self.mode = Mode::SyncProgress;
                 }
             }
         }
+    }
+
+    pub fn submit_password(&mut self) {
+        if let Some((session, pre_output)) = self.pty_session.take() {
+            let password = std::mem::take(&mut self.password_buffer);
+            match sync::feed_password(session, pre_output, &password) {
+                Ok(result) => {
+                    self.sync_output = result.output;
+                    self.sync_error = !result.success;
+                    self.mode = Mode::SyncProgress;
+                }
+                Err(e) => {
+                    self.sync_output = e.to_string();
+                    self.sync_error = true;
+                    self.mode = Mode::SyncProgress;
+                }
+            }
+            let len = password.len();
+            drop(password);
+            self.password_buffer = "\0".repeat(len);
+            self.password_buffer.clear();
+        }
+    }
+
+    pub fn cancel_password(&mut self) {
+        self.pty_session = None;
+        self.password_buffer.clear();
+        self.mode = Mode::SyncPreview;
+        self.status_msg = "sync cancelled".to_string();
+    }
+
+    fn show_auth_fallback(&mut self) {
+        self.sync_output = format!(
+            "Authentication failed: SSH key not configured and interactive\n\
+             terminal (PTY) is not available in this environment.\n\n\
+             Please configure SSH key-based authentication:\n\n\
+               ssh-keygen -t ed25519\n\
+               ssh-copy-id <remote>"
+        );
+        self.sync_error = true;
+        self.mode = Mode::SyncProgress;
     }
 
     pub fn tree_cursor_down(&mut self) {
