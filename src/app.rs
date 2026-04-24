@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::config::Pair;
-use crate::sync::{self, ListPhase, SyncError, SyncPhase};
+use crate::sync::{self, FeedPasswordPhase, ListPhase, SyncError, SyncPhase};
 use crate::tree::{self, FileNode};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -402,7 +402,13 @@ impl App {
             let context = self.password_context.clone();
 
             match sync::feed_password(session, pre_output, &password) {
-                Ok(result) => match context {
+                Ok(FeedPasswordPhase::NeedPassword((session, pre_output))) => {
+                    self.pty_session = Some((session, pre_output));
+                    self.password_buffer.clear();
+                    self.status_msg = "wrong password, try again".to_string();
+                    self.mode = Mode::PasswordInput;
+                }
+                Ok(FeedPasswordPhase::Done(result)) => match context {
                     PasswordContext::Sync => {
                         self.sync_output = result.output;
                         self.sync_error = !result.success;

@@ -272,26 +272,51 @@ pub fn list_remote_interactive(remote: &str) -> std::result::Result<ListPhase, S
     }
 }
 
+pub enum FeedPasswordPhase {
+    NeedPassword((expectrl::session::OsSession, Vec<u8>)),
+    Done(SyncResult),
+}
+
 pub fn feed_password(
     mut session: expectrl::session::OsSession,
-    pre_output: Vec<u8>,
+    mut pre_output: Vec<u8>,
     password: &str,
-) -> std::result::Result<SyncResult, SyncError> {
+) -> std::result::Result<FeedPasswordPhase, SyncError> {
     session
         .send_line(password)
         .map_err(|e| SyncError::Other(format!("failed to send password: {}", e)))?;
 
-    let mut output = pre_output;
-
     loop {
-        match session.expect(expectrl::Eof) {
+        match session.expect(expectrl::Any::boxed(vec![
+            Box::new(expectrl::Regex("(?i)password")),
+            Box::new(expectrl::Regex("(?i)are you sure")),
+            Box::new(expectrl::Regex("(?i)fingerprint")),
+        ])) {
             Ok(captures) => {
-                output.extend_from_slice(captures.as_bytes());
-                break;
+                let matched = String::from_utf8_lossy(captures.as_bytes());
+                pre_output.extend_from_slice(captures.as_bytes());
+
+                if matched.to_lowercase().contains("password") {
+                    return Ok(FeedPasswordPhase::NeedPassword((session, pre_output)));
+                } else {
+                    session.send_line("yes").map_err(|e| {
+                        SyncError::Other(format!("failed to send host key confirmation: {}", e))
+                    })?;
+                    continue;
+                }
+            }
+            Err(expectrl::Error::Eof) => {
+                let output = drain_session_with_prefix(session, &pre_output);
+                let success = !output.to_lowercase().contains("permission denied")
+                    && !output.to_lowercase().contains("authentication");
+                return Ok(FeedPasswordPhase::Done(SyncResult { output, success }));
             }
             Err(expectrl::Error::ExpectTimeout) => {
                 let mut tmp = [0u8; 4096];
-                let _ = session.try_read(&mut tmp);
+                let n = session.try_read(&mut tmp).unwrap_or(0);
+                if n > 0 {
+                    pre_output.extend_from_slice(&tmp[..n]);
+                }
                 continue;
             }
             Err(e) => {
@@ -302,15 +327,6 @@ pub fn feed_password(
             }
         }
     }
-
-    let output_str = String::from_utf8_lossy(&output).to_string();
-    let success = !output_str.to_lowercase().contains("permission denied")
-        && !output_str.to_lowercase().contains("authentication");
-
-    Ok(SyncResult {
-        output: output_str,
-        success,
-    })
 }
 
 fn drain_session_with_prefix(mut session: expectrl::session::OsSession, prefix: &[u8]) -> String {
