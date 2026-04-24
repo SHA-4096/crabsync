@@ -153,3 +153,107 @@ pub fn flatten_tree_for_display(node: &FileNode, depth: usize, items: &mut Vec<(
         }
     }
 }
+
+pub fn is_local_path(path: &str) -> bool {
+    !path.contains(':') || path.starts_with('/')
+}
+
+pub fn build_tree_from_listing(output: &str) -> FileNode {
+    let mut root_node = FileNode {
+        name: ".".to_string(),
+        relative_path: PathBuf::new(),
+        is_dir: true,
+        selected: false,
+        expanded: true,
+        children: Vec::new(),
+    };
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let first_char = trimmed.chars().next().unwrap_or(' ');
+        if first_char != 'd' && first_char != '-' && first_char != 'l' {
+            continue;
+        }
+
+        let is_dir = first_char == 'd';
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 5 {
+            continue;
+        }
+
+        let rel_path_str = parts[parts.len() - 1];
+        if rel_path_str == "." {
+            continue;
+        }
+        let rel_path = PathBuf::from(rel_path_str);
+
+        insert_node(&mut root_node, rel_path, is_dir);
+    }
+
+    root_node
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_local_path() {
+        assert!(is_local_path("/home/user/data"));
+        assert!(is_local_path("./relative"));
+        assert!(!is_local_path("user@host:/data"));
+        assert!(!is_local_path("host:/data"));
+    }
+
+    #[test]
+    fn test_build_tree_from_listing() {
+        let listing = "\
+drwxr-xr-x          4096 2024/01/01 00:00:00 .
+drwxr-xr-x          4096 2024/01/01 00:00:00 subdir
+-rw-r--r--           123 2024/01/01 00:00:00 file1.txt
+-rw-r--r--           456 2024/01/01 00:00:00 subdir/file2.txt";
+
+        let tree = build_tree_from_listing(listing);
+
+        assert!(tree.is_dir);
+        assert_eq!(tree.children.len(), 2);
+
+        let dir_child = tree.children.iter().find(|c| c.name == "subdir").unwrap();
+        assert!(dir_child.is_dir);
+        assert_eq!(dir_child.children.len(), 1);
+
+        let file_child = tree
+            .children
+            .iter()
+            .find(|c| c.name == "file1.txt")
+            .unwrap();
+        assert!(!file_child.is_dir);
+
+        let nested = dir_child
+            .children
+            .iter()
+            .find(|c| c.name == "file2.txt")
+            .unwrap();
+        assert!(!nested.is_dir);
+        assert_eq!(nested.relative_path, PathBuf::from("subdir/file2.txt"));
+    }
+
+    #[test]
+    fn test_build_tree_from_listing_empty() {
+        let tree = build_tree_from_listing("");
+        assert!(tree.is_dir);
+        assert!(tree.children.is_empty());
+    }
+
+    #[test]
+    fn test_build_tree_from_listing_dots_only() {
+        let listing = "\
+drwxr-xr-x          4096 2024/01/01 00:00:00 .";
+
+        let tree = build_tree_from_listing(listing);
+        assert!(tree.children.is_empty());
+    }
+}

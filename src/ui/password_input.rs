@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, PasswordContext};
 
 pub fn draw(f: &mut Frame, app: &App, area: Rect) {
     let remote = app
@@ -13,13 +13,15 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         .map(|p| p.remote.as_str())
         .unwrap_or("remote");
 
+    let prompt = match app.password_context {
+        PasswordContext::Sync => format!("Password for {} (sync):", remote),
+        PasswordContext::RemoteList => format!("Password for {} (load remote tree):", remote),
+    };
+
     let masked = "*".repeat(app.password_buffer.len());
 
     let lines = vec![
-        Line::from(Span::styled(
-            format!("Password for {}:", remote),
-            Style::default().fg(Color::Yellow),
-        )),
+        Line::from(Span::styled(prompt, Style::default().fg(Color::Yellow))),
         Line::from(""),
         Line::from(vec![
             Span::styled("> ", Style::default().fg(Color::Cyan)),

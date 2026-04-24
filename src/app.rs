@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 
 use crate::config::Pair;
-use crate::sync::{self, SyncError, SyncPhase};
+use crate::sync::{self, ListPhase, SyncError, SyncPhase};
 use crate::tree::{self, FileNode};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -13,6 +13,27 @@ pub enum Mode {
     SyncProgress,
     PasswordInput,
     Help,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ActivePanel {
+    Source,
+    Target,
+}
+
+#[derive(Debug, Clone)]
+pub enum RemoteStatus {
+    NotLoaded,
+    Loading,
+    Loaded,
+    AuthRequired,
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PasswordContext {
+    Sync,
+    RemoteList,
 }
 
 pub struct App {
@@ -34,6 +55,12 @@ pub struct App {
     pub select_all: bool,
     pub pty_session: Option<(expectrl::session::OsSession, Vec<u8>)>,
     pub password_buffer: String,
+    pub active_panel: ActivePanel,
+    pub remote_tree: Option<FileNode>,
+    pub remote_tree_items: Vec<(usize, FileNode)>,
+    pub remote_tree_cursor: usize,
+    pub remote_status: RemoteStatus,
+    pub password_context: PasswordContext,
 }
 
 impl App {
@@ -47,7 +74,7 @@ impl App {
                 let mut items = Vec::new();
                 tree::flatten_tree_for_display(&tree, 0, &mut items);
 
-                return Ok(Self {
+                let mut app = Self {
                     mode: Mode::FileTree,
                     previous_mode: None,
                     pairs,
@@ -66,7 +93,15 @@ impl App {
                     select_all: false,
                     pty_session: None,
                     password_buffer: String::new(),
-                });
+                    active_panel: ActivePanel::Source,
+                    remote_tree: None,
+                    remote_tree_items: Vec::new(),
+                    remote_tree_cursor: 0,
+                    remote_status: RemoteStatus::NotLoaded,
+                    password_context: PasswordContext::Sync,
+                };
+                app.load_remote_tree();
+                return Ok(app);
             } else {
                 anyhow::bail!("pair '{}' not found", name);
             }
@@ -91,6 +126,12 @@ impl App {
             select_all: false,
             pty_session: None,
             password_buffer: String::new(),
+            active_panel: ActivePanel::Source,
+            remote_tree: None,
+            remote_tree_items: Vec::new(),
+            remote_tree_cursor: 0,
+            remote_status: RemoteStatus::NotLoaded,
+            password_context: PasswordContext::Sync,
         })
     }
 
@@ -107,10 +148,124 @@ impl App {
             self.tree_items = items;
             self.tree_cursor = 0;
             self.tree_scroll = 0;
+            self.active_panel = ActivePanel::Source;
+            self.remote_tree = None;
+            self.remote_tree_items = Vec::new();
+            self.remote_tree_cursor = 0;
+            self.remote_status = RemoteStatus::NotLoaded;
             self.mode = Mode::FileTree;
             self.status_msg.clear();
+            self.load_remote_tree();
         }
         Ok(())
+    }
+
+    pub fn load_remote_tree(&mut self) {
+        if let Some(pair) = &self.current_pair {
+            let remote = pair.remote.clone();
+            if tree::is_local_path(&remote) {
+                match tree::build_tree(Path::new(&remote)) {
+                    Ok(tree) => {
+                        let mut items = Vec::new();
+                        tree::flatten_tree_for_display(&tree, 0, &mut items);
+                        self.remote_tree = Some(tree);
+                        self.remote_tree_items = items;
+                        self.remote_tree_cursor = 0;
+                        self.remote_status = RemoteStatus::Loaded;
+                    }
+                    Err(e) => {
+                        self.remote_status = RemoteStatus::Error(e.to_string());
+                    }
+                }
+            } else {
+                self.remote_status = RemoteStatus::Loading;
+                match sync::list_remote(&remote) {
+                    Ok(output) => {
+                        let tree = tree::build_tree_from_listing(&output);
+                        let mut items = Vec::new();
+                        tree::flatten_tree_for_display(&tree, 0, &mut items);
+                        self.remote_tree = Some(tree);
+                        self.remote_tree_items = items;
+                        self.remote_tree_cursor = 0;
+                        self.remote_status = RemoteStatus::Loaded;
+                    }
+                    Err(SyncError::AuthRequired) => {
+                        self.remote_status = RemoteStatus::AuthRequired;
+                    }
+                    Err(SyncError::Other(msg)) => {
+                        self.remote_status = RemoteStatus::Error(msg);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn load_remote_interactive(&mut self) {
+        if let Some(pair) = &self.current_pair {
+            let remote = pair.remote.clone();
+            match sync::list_remote_interactive(&remote) {
+                Ok(ListPhase::NeedPassword((session, pre_output))) => {
+                    self.pty_session = Some((session, pre_output));
+                    self.password_buffer.clear();
+                    self.password_context = PasswordContext::RemoteList;
+                    self.mode = Mode::PasswordInput;
+                }
+                Ok(ListPhase::Done(output)) => {
+                    let tree = tree::build_tree_from_listing(&output);
+                    let mut items = Vec::new();
+                    tree::flatten_tree_for_display(&tree, 0, &mut items);
+                    self.remote_tree = Some(tree);
+                    self.remote_tree_items = items;
+                    self.remote_tree_cursor = 0;
+                    self.remote_status = RemoteStatus::Loaded;
+                }
+                Err(SyncError::AuthRequired) => {
+                    self.remote_status = RemoteStatus::AuthRequired;
+                }
+                Err(SyncError::Other(msg)) => {
+                    self.remote_status = RemoteStatus::Error(format!(
+                        "PTY unavailable: {}. Please configure SSH key-based authentication.",
+                        msg
+                    ));
+                }
+            }
+        }
+    }
+
+    pub fn toggle_panel(&mut self) {
+        self.active_panel = match self.active_panel {
+            ActivePanel::Source => ActivePanel::Target,
+            ActivePanel::Target => ActivePanel::Source,
+        };
+    }
+
+    pub fn remote_tree_cursor_down(&mut self) {
+        if !self.remote_tree_items.is_empty()
+            && self.remote_tree_cursor < self.remote_tree_items.len() - 1
+        {
+            self.remote_tree_cursor += 1;
+        }
+    }
+
+    pub fn remote_tree_cursor_up(&mut self) {
+        if self.remote_tree_cursor > 0 {
+            self.remote_tree_cursor -= 1;
+        }
+    }
+
+    pub fn toggle_expand_remote(&mut self) {
+        if self.remote_tree_items.is_empty() {
+            return;
+        }
+        let cursor = self.remote_tree_cursor;
+        if let Some(item) = self.remote_tree_items.get(cursor) {
+            let rel_path = item.1.relative_path.clone();
+            if let Some(tree) = &mut self.remote_tree {
+                toggle_node_by_path(tree, &rel_path, true, true);
+                self.remote_tree_items.clear();
+                tree::flatten_tree_for_display(tree, 0, &mut self.remote_tree_items);
+            }
+        }
     }
 
     pub fn toggle_tree_item(&mut self) {
@@ -198,6 +353,9 @@ impl App {
                     self.sync_error = !result.success;
                     self.mode = Mode::SyncProgress;
                     self.status_msg.clear();
+                    if result.success {
+                        self.load_remote_tree();
+                    }
                 }
                 Err(SyncError::AuthRequired) => {
                     let files_clone = files.clone();
@@ -207,6 +365,7 @@ impl App {
                         Ok(SyncPhase::NeedPassword((session, pre_output))) => {
                             self.pty_session = Some((session, pre_output));
                             self.password_buffer.clear();
+                            self.password_context = PasswordContext::Sync;
                             self.mode = Mode::PasswordInput;
                         }
                         Ok(SyncPhase::Done(result)) => {
@@ -214,6 +373,9 @@ impl App {
                             self.sync_error = !result.success;
                             self.mode = Mode::SyncProgress;
                             self.status_msg.clear();
+                            if result.success {
+                                self.load_remote_tree();
+                            }
                         }
                         Err(SyncError::AuthRequired) => {
                             self.show_auth_fallback();
@@ -237,17 +399,42 @@ impl App {
     pub fn submit_password(&mut self) {
         if let Some((session, pre_output)) = self.pty_session.take() {
             let password = std::mem::take(&mut self.password_buffer);
+            let context = self.password_context.clone();
+
             match sync::feed_password(session, pre_output, &password) {
-                Ok(result) => {
-                    self.sync_output = result.output;
-                    self.sync_error = !result.success;
-                    self.mode = Mode::SyncProgress;
-                }
-                Err(e) => {
-                    self.sync_output = e.to_string();
-                    self.sync_error = true;
-                    self.mode = Mode::SyncProgress;
-                }
+                Ok(result) => match context {
+                    PasswordContext::Sync => {
+                        self.sync_output = result.output;
+                        self.sync_error = !result.success;
+                        self.mode = Mode::SyncProgress;
+                        self.load_remote_tree();
+                    }
+                    PasswordContext::RemoteList => {
+                        if result.success {
+                            let tree = tree::build_tree_from_listing(&result.output);
+                            let mut items = Vec::new();
+                            tree::flatten_tree_for_display(&tree, 0, &mut items);
+                            self.remote_tree = Some(tree);
+                            self.remote_tree_items = items;
+                            self.remote_tree_cursor = 0;
+                            self.remote_status = RemoteStatus::Loaded;
+                        } else {
+                            self.remote_status = RemoteStatus::Error(result.output);
+                        }
+                        self.mode = Mode::FileTree;
+                    }
+                },
+                Err(e) => match context {
+                    PasswordContext::Sync => {
+                        self.sync_output = e.to_string();
+                        self.sync_error = true;
+                        self.mode = Mode::SyncProgress;
+                    }
+                    PasswordContext::RemoteList => {
+                        self.remote_status = RemoteStatus::Error(e.to_string());
+                        self.mode = Mode::FileTree;
+                    }
+                },
             }
             let len = password.len();
             drop(password);
@@ -259,8 +446,16 @@ impl App {
     pub fn cancel_password(&mut self) {
         self.pty_session = None;
         self.password_buffer.clear();
-        self.mode = Mode::SyncPreview;
-        self.status_msg = "sync cancelled".to_string();
+        match self.password_context {
+            PasswordContext::Sync => {
+                self.mode = Mode::SyncPreview;
+                self.status_msg = "sync cancelled".to_string();
+            }
+            PasswordContext::RemoteList => {
+                self.mode = Mode::FileTree;
+                self.status_msg = "remote list cancelled".to_string();
+            }
+        }
     }
 
     fn show_auth_fallback(&mut self) {

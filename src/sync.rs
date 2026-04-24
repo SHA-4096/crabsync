@@ -30,6 +30,61 @@ pub enum SyncPhase {
     Done(SyncResult),
 }
 
+pub enum ListPhase {
+    NeedPassword((expectrl::session::OsSession, Vec<u8>)),
+    Done(String),
+}
+
+enum InteractivePhase {
+    NeedPassword((expectrl::session::OsSession, Vec<u8>)),
+    Done(String),
+}
+
+fn run_rsync_pty(args: &[String]) -> std::result::Result<InteractivePhase, SyncError> {
+    let cmd_str = format!("rsync {}", args.join(" "));
+    let mut session = expectrl::spawn(&cmd_str).map_err(|e| {
+        SyncError::Other(format!(
+            "PTY not available: {}. Please configure SSH key-based authentication.",
+            e
+        ))
+    })?;
+
+    session.set_expect_timeout(Some(std::time::Duration::from_secs(30)));
+
+    let mut pre_output = Vec::new();
+
+    loop {
+        match session.expect(expectrl::Any::boxed(vec![
+            Box::new(expectrl::Regex("(?i)password")),
+            Box::new(expectrl::Regex("(?i)are you sure")),
+            Box::new(expectrl::Regex("(?i)fingerprint")),
+        ])) {
+            Ok(captures) => {
+                let matched = String::from_utf8_lossy(captures.as_bytes());
+                pre_output.extend_from_slice(captures.as_bytes());
+
+                if matched.to_lowercase().contains("password") {
+                    return Ok(InteractivePhase::NeedPassword((session, pre_output)));
+                } else {
+                    session.send_line("yes").map_err(|e| {
+                        SyncError::Other(format!("failed to send host key confirmation: {}", e))
+                    })?;
+                    continue;
+                }
+            }
+            Err(expectrl::Error::Eof) => {
+                let output = drain_session_with_prefix(session, &pre_output);
+                return Ok(InteractivePhase::Done(output));
+            }
+            Err(expectrl::Error::ExpectTimeout) => {
+                let output = drain_session_with_prefix(session, &pre_output);
+                return Ok(InteractivePhase::Done(output));
+            }
+            Err(e) => return Err(SyncError::Other(format!("unexpected rsync output: {}", e))),
+        }
+    }
+}
+
 fn build_args(
     local: &str,
     remote: &str,
@@ -163,53 +218,57 @@ pub fn do_sync_interactive(
         false,
     );
 
-    let cmd_str = format!("rsync {}", args.join(" "));
-    let mut session = expectrl::spawn(&cmd_str).map_err(|e| {
-        SyncError::Other(format!(
-            "PTY not available: {}. Please configure SSH key-based authentication.",
-            e
-        ))
-    })?;
-
-    session.set_expect_timeout(Some(std::time::Duration::from_secs(30)));
-
-    let mut pre_output = Vec::new();
-
-    loop {
-        match session.expect(expectrl::Any::boxed(vec![
-            Box::new(expectrl::Regex("(?i)password")),
-            Box::new(expectrl::Regex("(?i)are you sure")),
-            Box::new(expectrl::Regex("(?i)fingerprint")),
-        ])) {
-            Ok(captures) => {
-                let matched = String::from_utf8_lossy(captures.as_bytes());
-                pre_output.extend_from_slice(captures.as_bytes());
-
-                if matched.to_lowercase().contains("password") {
-                    return Ok(SyncPhase::NeedPassword((session, pre_output)));
-                } else {
-                    session.send_line("yes").map_err(|e| {
-                        SyncError::Other(format!("failed to send host key confirmation: {}", e))
-                    })?;
-                    continue;
-                }
-            }
-            Err(expectrl::Error::Eof) => {
-                let output = drain_session_with_prefix(session, &pre_output);
-                return Ok(SyncPhase::Done(SyncResult {
-                    output,
-                    success: true,
-                }));
-            }
-            Err(expectrl::Error::ExpectTimeout) => {
-                let output = drain_session_with_prefix(session, &pre_output);
-                return Ok(SyncPhase::Done(SyncResult {
-                    output,
-                    success: true,
-                }));
-            }
-            Err(e) => return Err(SyncError::Other(format!("unexpected rsync output: {}", e))),
+    match run_rsync_pty(&args)? {
+        InteractivePhase::NeedPassword((session, pre_output)) => {
+            Ok(SyncPhase::NeedPassword((session, pre_output)))
         }
+        InteractivePhase::Done(output) => Ok(SyncPhase::Done(SyncResult {
+            output,
+            success: true,
+        })),
+    }
+}
+
+pub fn list_remote(remote: &str) -> std::result::Result<String, SyncError> {
+    let mut args = vec![
+        "-r".to_string(),
+        "--list-only".to_string(),
+        r#"--rsh=ssh -o BatchMode=yes"#.to_string(),
+    ];
+    args.push(format!("{}/", remote));
+
+    let output = Command::new("rsync")
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| SyncError::Other(format!("failed to run rsync --list-only: {}", e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        if is_auth_error(&stderr) {
+            return Err(SyncError::AuthRequired);
+        }
+        return Err(SyncError::Other(format!(
+            "rsync --list-only failed:\n{}",
+            stderr
+        )));
+    }
+
+    Ok(if stdout.is_empty() { stderr } else { stdout })
+}
+
+pub fn list_remote_interactive(remote: &str) -> std::result::Result<ListPhase, SyncError> {
+    let mut args = vec!["-r".to_string(), "--list-only".to_string()];
+    args.push(format!("{}/", remote));
+
+    match run_rsync_pty(&args)? {
+        InteractivePhase::NeedPassword((session, pre_output)) => {
+            Ok(ListPhase::NeedPassword((session, pre_output)))
+        }
+        InteractivePhase::Done(output) => Ok(ListPhase::Done(output)),
     }
 }
 
@@ -472,5 +531,33 @@ mod tests {
     fn test_build_args_without_batch_mode() {
         let args = build_args("/local", "/remote", "/tmp/files", false, false);
         assert!(!args.iter().any(|a| a.contains("BatchMode")));
+    }
+
+    #[test]
+    fn test_list_remote_local_dir() {
+        let remote = tempfile::TempDir::new().unwrap();
+        fs::write(remote.path().join("file1.txt"), "hello").unwrap();
+        fs::create_dir(remote.path().join("subdir")).unwrap();
+        fs::write(remote.path().join("subdir/file2.txt"), "world").unwrap();
+
+        let output = list_remote(remote.path().to_str().unwrap()).unwrap();
+
+        assert!(
+            output.contains("file1.txt"),
+            "list_remote should mention file1.txt"
+        );
+        assert!(
+            output.contains("subdir"),
+            "list_remote should mention subdir"
+        );
+    }
+
+    #[test]
+    fn test_list_remote_nonexistent_dir() {
+        let result = list_remote("/nonexistent/path");
+        assert!(
+            result.is_err(),
+            "list_remote should fail for nonexistent dir"
+        );
     }
 }
