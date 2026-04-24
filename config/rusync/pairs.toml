@@ -1,0 +1,4 @@
+[[pairs]]
+name = "my-project"
+local = "/tmp/rusync_test_local"
+remote = "/tmp/rusync_test_remote"
