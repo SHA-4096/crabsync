@@ -2,6 +2,8 @@
 
 A terminal UI for rsync file synchronization. Browse, select, and sync files between local and remote directories with an intuitive split-pane interface.
 
+![transfer](./resources/transfer.gif)
+
 ## Features
 
 - **Split-pane file tree** — browse source (local) and target (remote) directories side by side
@@ -24,16 +26,14 @@ A terminal UI for rsync file synchronization. Browse, select, and sync files bet
 ### From Source
 
 ```bash
-git clone https://github.com/anomalyco/crabsync.git
-cd crabsync
-cargo build --release
+cargo install --git https://github.com/SHA-4096/crabsync.git --locked
 ```
 
-The binary is at `target/release/crabsync`.
+The binary will be installed to `~/.cargo/bin/crabsync` (ensure `~/.cargo/bin` is on your `$PATH`).
 
 ### From Release
 
-Download a pre-built archive from [GitHub Releases](https://github.com/anomalyco/crabsync/releases):
+Download a pre-built archive from [GitHub Releases](https://github.com/SHA-4096/crabsync/releases):
 
 | Platform | File |
 |----------|------|
