@@ -19,9 +19,13 @@ pub enum Commands {
         name: String,
         local: String,
         remote: String,
+        #[arg(long, default_value_t = false)]
+        global: bool,
     },
     Remove {
         name: String,
+        #[arg(long, default_value_t = false)]
+        global: bool,
     },
     List,
     Sync {
@@ -35,23 +39,53 @@ pub fn handle_command(cmd: &Commands) -> anyhow::Result<()> {
             name,
             local,
             remote,
+            global,
         } => {
-            config::add_pair(name.clone(), local.clone(), remote.clone())?;
-            println!("added pair '{}': {} -> {}", name, local, remote);
+            let source = if *global {
+                config::PairSource::Global
+            } else {
+                config::PairSource::Local
+            };
+            config::add_pair(name.clone(), local.clone(), remote.clone(), source)?;
+            let scope = if *global { "global" } else { "local" };
+            println!(
+                "added pair '{}' to {} config: {} -> {}",
+                name, scope, local, remote
+            );
             Ok(())
         }
-        Commands::Remove { name } => {
-            config::remove_pair(name)?;
-            println!("removed pair '{}'", name);
+        Commands::Remove { name, global } => {
+            if *global {
+                config::remove_pair(name, config::PairSource::Global)?;
+                println!("removed pair '{}' from global config", name);
+            } else {
+                match config::remove_pair(name, config::PairSource::Local) {
+                    Ok(()) => {
+                        println!("removed pair '{}' from local config", name);
+                    }
+                    Err(_) => {
+                        config::remove_pair(name, config::PairSource::Global)?;
+                        println!("removed pair '{}' from global config", name);
+                    }
+                }
+            }
             Ok(())
         }
         Commands::List => {
-            let pairs = config::load_pairs()?;
-            if pairs.is_empty() {
+            let all = config::load_all_pairs();
+            if all.is_empty() {
                 println!("no pairs configured");
             } else {
-                for p in &pairs {
-                    println!("{}: {} -> {}", p.name, p.local, p.remote);
+                for tp in &all {
+                    let scope = match tp.source {
+                        config::PairSource::Local => "local",
+                        config::PairSource::Global => "global",
+                    };
+                    let shadowed = if tp.shadowed { " (shadowed)" } else { "" };
+                    println!(
+                        "{}: {} -> {} [{}]{}",
+                        tp.pair.name, tp.pair.local, tp.pair.remote, scope, shadowed
+                    );
                 }
             }
             Ok(())

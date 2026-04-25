@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use crate::config::Pair;
+use crate::config::{Pair, PairSource, TaggedPair};
 use crate::sync::{self, FeedPasswordPhase, ListPhase, SyncError, SyncPhase};
 use crate::tree::{self, FileNode};
 
@@ -12,6 +12,7 @@ pub enum Mode {
     SyncPreview,
     SyncProgress,
     PasswordInput,
+    AddPair,
     Help,
 }
 
@@ -45,7 +46,7 @@ pub enum SyncDirection {
 pub struct App {
     pub mode: Mode,
     pub previous_mode: Option<Mode>,
-    pub pairs: Vec<Pair>,
+    pub pairs: Vec<TaggedPair>,
     pub pair_index: usize,
     pub current_pair: Option<Pair>,
     pub tree: Option<FileNode>,
@@ -68,14 +69,24 @@ pub struct App {
     pub remote_status: RemoteStatus,
     pub password_context: PasswordContext,
     pub sync_direction: SyncDirection,
+    pub add_pair_name: String,
+    pub add_pair_local: String,
+    pub add_pair_remote: String,
+    pub add_pair_scope: PairSource,
+    pub add_pair_focus: usize,
 }
 
 impl App {
     pub fn new(initial_pair_name: Option<&str>) -> Result<Self> {
-        let pairs = crate::config::load_pairs().unwrap_or_default();
+        let pairs = crate::config::load_all_pairs();
 
         if let Some(name) = initial_pair_name {
-            if let Some(pair) = pairs.iter().find(|p| p.name == name).cloned() {
+            if let Some(tp) = pairs
+                .iter()
+                .find(|tp| tp.pair.name == name && !tp.shadowed)
+                .cloned()
+            {
+                let pair = tp.pair.clone();
                 let tree = tree::build_tree(Path::new(&pair.local))
                     .with_context(|| format!("failed to build tree for '{}'", pair.local))?;
                 let mut items = Vec::new();
@@ -107,6 +118,11 @@ impl App {
                     remote_status: RemoteStatus::NotLoaded,
                     password_context: PasswordContext::Sync,
                     sync_direction: SyncDirection::Upload,
+                    add_pair_name: String::new(),
+                    add_pair_local: String::new(),
+                    add_pair_remote: String::new(),
+                    add_pair_scope: PairSource::Local,
+                    add_pair_focus: 0,
                 };
                 app.load_remote_tree();
                 return Ok(app);
@@ -141,12 +157,18 @@ impl App {
             remote_status: RemoteStatus::NotLoaded,
             password_context: PasswordContext::Sync,
             sync_direction: SyncDirection::Upload,
+            add_pair_name: String::new(),
+            add_pair_local: String::new(),
+            add_pair_remote: String::new(),
+            add_pair_scope: PairSource::Local,
+            add_pair_focus: 0,
         })
     }
 
     pub fn enter_file_tree(&mut self) -> Result<()> {
-        let pair = self.pairs.get(self.pair_index).cloned();
-        if let Some(pair) = pair {
+        let tp = self.pairs.get(self.pair_index).cloned();
+        if let Some(tp) = tp {
+            let pair = tp.pair.clone();
             let tree = tree::build_tree(Path::new(&pair.local))
                 .with_context(|| format!("failed to build tree for '{}'", pair.local))?;
             let mut items = Vec::new();
@@ -353,6 +375,46 @@ impl App {
                 tree::flatten_tree_for_display(&tree, 0, &mut items);
                 self.tree = Some(tree);
                 self.tree_items = items;
+            }
+        }
+    }
+
+    pub fn refresh_pairs(&mut self) {
+        self.pairs = crate::config::load_all_pairs();
+        if self.pair_index >= self.pairs.len() && self.pair_index > 0 {
+            self.pair_index = self.pairs.len().saturating_sub(1);
+        }
+    }
+
+    pub fn start_add_pair(&mut self) {
+        self.add_pair_name.clear();
+        self.add_pair_local.clear();
+        self.add_pair_remote.clear();
+        self.add_pair_scope = PairSource::Local;
+        self.add_pair_focus = 0;
+        self.status_msg.clear();
+        self.mode = Mode::AddPair;
+    }
+
+    pub fn add_pair_from_form(&mut self) {
+        let name = self.add_pair_name.trim().to_string();
+        let local = self.add_pair_local.trim().to_string();
+        let remote = self.add_pair_remote.trim().to_string();
+        let scope = self.add_pair_scope.clone();
+
+        if name.is_empty() || local.is_empty() || remote.is_empty() {
+            self.status_msg = "all fields are required".to_string();
+            return;
+        }
+
+        match crate::config::add_pair(name, local, remote, scope) {
+            Ok(()) => {
+                self.refresh_pairs();
+                self.mode = Mode::PairList;
+                self.status_msg.clear();
+            }
+            Err(e) => {
+                self.status_msg = format!("error: {}", e);
             }
         }
     }

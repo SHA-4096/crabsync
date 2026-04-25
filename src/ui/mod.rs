@@ -1,3 +1,4 @@
+mod add_pair;
 mod file_tree;
 mod pair_list;
 mod password_input;
@@ -17,6 +18,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::SyncPreview => sync_preview::draw(f, app, area),
         Mode::SyncProgress => sync_progress::draw(f, app, area),
         Mode::PasswordInput => password_input::draw(f, app, area),
+        Mode::AddPair => add_pair::draw(f, app, area),
         Mode::Help => draw_help(f, app, area),
     }
 }
@@ -28,6 +30,7 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
         Mode::SyncPreview => sync_preview::handle_key(app, key),
         Mode::SyncProgress => sync_progress::handle_key(app, key),
         Mode::PasswordInput => password_input::handle_key(app, key),
+        Mode::AddPair => add_pair::handle_key(app, key),
         Mode::Help => {
             if let crossterm::event::KeyCode::Char('q') | crossterm::event::KeyCode::Esc = key.code
             {
@@ -49,6 +52,7 @@ fn draw_help(f: &mut Frame, _app: &App, area: Rect) {
         ratatui::text::Line::from("  j/\u{2193}     - move down"),
         ratatui::text::Line::from("  k/\u{2191}     - move up"),
         ratatui::text::Line::from("  Enter   - enter file tree"),
+        ratatui::text::Line::from("  a       - add pair"),
         ratatui::text::Line::from("  d       - delete pair"),
         ratatui::text::Line::from(""),
         ratatui::text::Line::from("File Tree:"),
@@ -69,6 +73,12 @@ fn draw_help(f: &mut Frame, _app: &App, area: Rect) {
         ratatui::text::Line::from(""),
         ratatui::text::Line::from("Password Input:"),
         ratatui::text::Line::from("  Enter   - submit password"),
+        ratatui::text::Line::from("  Esc     - cancel"),
+        ratatui::text::Line::from(""),
+        ratatui::text::Line::from("Add Pair:"),
+        ratatui::text::Line::from("  Tab     - next field"),
+        ratatui::text::Line::from("  Space   - toggle scope (Local/Global)"),
+        ratatui::text::Line::from("  Enter   - save pair"),
         ratatui::text::Line::from("  Esc     - cancel"),
         ratatui::text::Line::from(""),
         ratatui::text::Line::from("Sync Progress:"),

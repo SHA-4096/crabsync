@@ -11,6 +11,7 @@ A terminal UI for rsync file synchronization. Browse, select, and sync files bet
 - **SSH password support** — interactive password prompt via PTY when SSH keys aren't configured
 - **Wrong password retry** — automatically re-prompts on incorrect passwords instead of hanging
 - **CLI management** — add, remove, and list sync pairs from the command line
+- **Two-tier config** — local (`./crabsync.toml`) and global (`~/.config/crabsync/crabsync.toml`) config files; local pairs take priority over global pairs with the same name
 
 ## Requirements
 
@@ -51,17 +52,28 @@ sudo mv crabsync /usr/local/bin/
 
 ### Managing Pairs
 
-A "pair" links a local directory to a remote target. Pairs are stored in `config/rusync/pairs.toml` relative to the project root.
+A "pair" links a local directory to a remote target. Pairs are stored in two config files:
+
+- **Local**: `./crabsync.toml` (current directory, project-specific)
+- **Global**: `~/.config/crabsync/crabsync.toml` (shared across projects)
+
+Local pairs take priority — if the same name exists in both files, the global one is shadowed.
 
 ```bash
-# Add a sync pair
+# Add a pair (local config by default)
 crabsync add myproject ./data user@server:/backup/data
 
-# List configured pairs
+# Add a pair to global config
+crabsync add myproject ./data user@server:/backup/data --global
+
+# List configured pairs (shows scope: local/global)
 crabsync list
 
-# Remove a pair
+# Remove a pair (tries local first, then global)
 crabsync remove myproject
+
+# Remove a pair from global config only
+crabsync remove myproject --global
 ```
 
 ### Interactive TUI
@@ -83,6 +95,7 @@ crabsync sync myproject
 | `j` / `↓` | Move down |
 | `k` / `↑` | Move up |
 | `Enter` | Enter file tree |
+| `a` | Add pair |
 | `d` | Delete pair |
 
 #### File Tree
@@ -116,6 +129,15 @@ crabsync sync myproject
 | `Enter` | Submit password |
 | `Esc` | Cancel |
 
+#### Add Pair
+
+| Key | Action |
+|-----|--------|
+| `Tab` / `Shift+Tab` | Next / previous field |
+| `Space` | Toggle scope (Local / Global) |
+| `Enter` | Save pair |
+| `Esc` | Cancel |
+
 ## How It Works
 
 1. **Select a pair** from the list and press Enter
@@ -128,8 +150,9 @@ Upload syncs selected source files to the target. Download syncs selected target
 
 ## Configuration
 
-Pairs are stored in `config/rusync/pairs.toml`:
+Pairs are stored in two TOML files with the same format:
 
+**Local** (`./crabsync.toml`):
 ```toml
 [[pair]]
 name = "myproject"
@@ -137,7 +160,15 @@ local = "./data"
 remote = "user@server:/backup/data"
 ```
 
-Remote targets use the `rsync` remote path syntax (`user@host:/path`). Local-to-local pairs are also supported — just use a local path as the remote target.
+**Global** (`~/.config/crabsync/crabsync.toml`):
+```toml
+[[pair]]
+name = "photos"
+local = "/home/user/photos"
+remote = "nas:/backup/photos"
+```
+
+When both files contain a pair with the same name, the local one takes priority and the global one is shown as "shadowed" in the TUI. The global config directory and file are only created when you add your first global pair.
 
 ## Building
 

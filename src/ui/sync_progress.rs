@@ -57,7 +57,7 @@ pub fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) {
             app.sync_error = false;
             app.mode = crate::app::Mode::PairList;
             app.status_msg.clear();
-            app.pairs = crate::config::load_pairs().unwrap_or_default();
+            app.pairs = crate::config::load_all_pairs();
         }
         KeyCode::Char('?') => {
             app.previous_mode = Some(app.mode.clone());
